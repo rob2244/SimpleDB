@@ -1,21 +1,26 @@
 package persist
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"strings"
 	"testing"
 )
 
-func TestInsertAndRetrieve(t *testing.T) {
-	tbl := OpenDatabase()
+var testDirPath string = "test_data"
 
-	row, err := NewRow(33, "test", "testtesterson@gmail.com")
+func TestInsertAndRetrieve(t *testing.T) {
+	createTestDir(t, testDirPath)
+	t.Cleanup(cleanupTestDir(t, testDirPath))
+
+	tbl, err := OpenDatabase(path.Join(testDirPath, "test.db"))
 	if err != nil {
 		t.Fatalf("%s", err)
 	}
 
-	sr, err := row.Serialize()
+	row, err := NewRow(33, "test", "testtesterson@gmail.com")
 	if err != nil {
 		t.Fatalf("%s", err)
 	}
@@ -30,11 +35,17 @@ func TestInsertAndRetrieve(t *testing.T) {
 	}
 
 	defer r.Close()
+	// This will return an error if the close method down below
+	// is called. This isn't a problem as the file handle gets closed.
+	defer w.Close()
 
 	stdOut := os.Stdout
 	os.Stdout = w
 
-	tbl.Insert(sr)
+	if err := tbl.Insert(row); err != nil {
+		t.Fatalf("%s", err)
+	}
+
 	tbl.Select()
 
 	if err = w.Close(); err != nil {
@@ -54,37 +65,88 @@ func TestInsertAndRetrieve(t *testing.T) {
 	}
 }
 
-func TestErrorOnFullTable(t *testing.T) {
-	tbl := OpenDatabase()
+func TestBTreeNodeSplit(t *testing.T) {
+	createTestDir(t, testDirPath)
+	t.Cleanup(cleanupTestDir(t, testDirPath))
 
-	for !tbl.isFull() {
-		row, err := NewRow(33, "test", "testtesterson@gmail.com")
-		if err != nil {
-			t.Fatalf("%s", err)
-		}
-
-		sr, err := row.Serialize()
-		if err != nil {
-			t.Fatalf("%s", err)
-		}
-
-		tbl.Insert(sr)
-	}
-
-	row, err := NewRow(33, "test", "testtesterson@gmail.com")
+	tbl, err := OpenDatabase(path.Join(testDirPath, "test.db"))
 	if err != nil {
 		t.Fatalf("%s", err)
 	}
 
-	sr, err := row.Serialize()
+	var r *os.File
+	var w *os.File
+
+	r, w, err = os.Pipe()
 	if err != nil {
 		t.Fatalf("%s", err)
 	}
 
-	err = tbl.Insert(sr)
+	defer r.Close()
+	// This will return an error if the close method down below
+	// is called. This isn't a problem as the file handle gets closed.
+	defer w.Close()
 
-	if err == nil {
-		t.Fatal("No error returned on insert when full")
+	stdOut := os.Stdout
+	os.Stdout = w
+
+	for i := 0; i < 15; i++ {
+		row, err := NewRow(uint32(i), fmt.Sprintf("user#%d", i), fmt.Sprintf("person#%d@example.com", i))
+		if err != nil {
+			t.Fatalf("Unable to create row: '%s'", err)
+		}
+
+		if err := tbl.Insert(row); err != nil {
+			t.Fatalf("Unable to insert row: '%s'", err)
+		}
+	}
+
+	if err := tbl.PrintTree(0, 0); err != nil {
+		t.Fatalf("Unable to print tree: '%s'", err)
+	}
+
+	if err := tbl.Select(); err != nil {
+		t.Fatalf("Unable to select data: '%s'", err)
+	}
+
+	if err = w.Close(); err != nil {
+		t.Fatalf("%s", err)
+	}
+
+	out, err := ioutil.ReadAll(r)
+	if err != nil {
+		t.Fatalf("%s", err)
+	}
+
+	os.Stdout = stdOut
+	so := string(out)
+
+	expected := `
+- internal (size 1)
+  - leaf (size 7)
+	- 0
+	- 1
+	- 2
+	- 3
+	- 4
+	- 5
+	- 6
+  - key 6
+  - leaf (size 8)
+    - 7
+	- 8
+	- 9
+	- 10
+	- 11
+	- 12
+	- 13
+	- 14
+	`
+
+	fmt.Print(so)
+
+	if so != expected {
+		t.Fail()
 	}
 }
 
@@ -117,6 +179,16 @@ func TestErrorMessageOnStringBoundary(t *testing.T) {
 	}
 }
 
-func TestErrorOnNegativeId(t *testing.T) {
-	// TODO this should go in the repl testing
+func createTestDir(t *testing.T, dirPath string) {
+	if err := os.Mkdir(dirPath, os.FileMode(0777)); err != nil {
+		t.Fatalf("Unable to create testing directory '%s'. Aborting...", err)
+	}
+}
+
+func cleanupTestDir(t *testing.T, dirPath string) func() {
+	return func() {
+		if err := os.RemoveAll(testDirPath); err != nil {
+			t.Logf("Unable to delete test directory: '%s'", dirPath)
+		}
+	}
 }

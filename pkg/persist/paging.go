@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 type pager struct {
 	fileDescriptor *os.File
 	fileLength     uint32
+	numPages       uint32
 	pages          [][]byte
 }
 
@@ -16,12 +18,12 @@ func (p *pager) Close() error {
 	return p.fileDescriptor.Close()
 }
 
-func (p *pager) FlushPage(pageNum, size uint32) error {
+func (p *pager) FlushPage(pageNum uint32) error {
 	if p.pages[pageNum] == nil {
 		return fmt.Errorf("no page found to flush at index %d", pageNum)
 	}
 
-	_, err := p.fileDescriptor.WriteAt(p.pages[pageNum][:size], int64(pageNum)*int64(pageSize))
+	_, err := p.fileDescriptor.WriteAt(p.pages[pageNum], int64(pageNum)*int64(pageSize))
 	return err
 }
 
@@ -49,7 +51,15 @@ func (p *pager) GetPage(pageNum uint32) ([]byte, error) {
 		}
 	}
 
+	if pageNum >= p.numPages {
+		p.numPages++
+	}
+
 	return p.pages[pageNum], nil
+}
+
+func (p pager) GetUnusedPageNum() uint32 {
+	return p.numPages
 }
 
 func NewPager(filename string) (*pager, error) {
@@ -64,9 +74,15 @@ func NewPager(filename string) (*pager, error) {
 		return nil, err
 	}
 
+	fl := uint32(stat.Size())
+	if fl%pageSize != 0 {
+		return nil, errors.New("DB file is not a whole number of pages. Corrupt file")
+	}
+
 	return &pager{
 		fileDescriptor: file,
-		fileLength:     uint32(stat.Size()),
+		fileLength:     fl,
 		pages:          make([][]byte, tableMaxPages),
+		numPages:       fl / pageSize,
 	}, nil
 }

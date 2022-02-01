@@ -3,9 +3,10 @@ package persist
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"unicode"
+
+	"github.com/fatih/color"
 )
 
 // All fields will be fixed in length initially.
@@ -94,16 +95,15 @@ func NewRow(id uint32, username string, email string) (*Row, error) {
 }
 
 type Table struct {
-	numRows uint32
-	pager   *pager
-}
-
-func (t Table) isFull() bool {
-	return t.numRows >= tableMaxRows
+	rootPageNum uint32
+	pager       *pager
 }
 
 func (t *Table) Select() error {
-	c := TableStart(t)
+	c, err := TableStart(t)
+	if err != nil {
+		return err
+	}
 
 	for !c.endOfTable {
 		v, err := c.Value()
@@ -118,39 +118,96 @@ func (t *Table) Select() error {
 	return nil
 }
 
-func (t *Table) Insert(r serializedRow) error {
-	if t.isFull() {
-		return errors.New("no space left in table")
-	}
+func (t Table) PrintTree(pageNum uint32, indentationLevel int) error {
+	page, err := t.pager.GetPage(pageNum)
 
-	c := TableEnd(t)
-
-	s, err := c.Value()
 	if err != nil {
 		return err
 	}
 
-	copy(s, r)
+	switch getNodeType(page) {
+	case leafNode:
+		numKeys := getLeafNodeNumCells(page)
+		indent(indentationLevel)
+		fmt.Printf("- leaf (size %d)\n", numKeys)
 
-	t.numRows++
+		for i := 0; i < int(numKeys); i++ {
+			indent(indentationLevel + 1)
+			fmt.Printf("- %d\n", getLeafNodeKey(page, uint32(i)))
+		}
+		return nil
+
+	case internalNode:
+		numKeys := getInternalNodeNumKeys(page)
+		indent(indentationLevel)
+
+		fmt.Printf("- internal (size %d)\n", numKeys)
+		for i := 0; i < int(numKeys); i++ {
+			child, err := getInternalNodeChild(page, uint32(i))
+			if err != nil {
+				return err
+			}
+
+			t.PrintTree(child, indentationLevel+1)
+
+			indent(indentationLevel + 1)
+			fmt.Printf("- key %d\n", getInternalNodeKey(page, uint32(i)))
+		}
+
+		child := getInternalNodeRightChild(page)
+		t.PrintTree(child, indentationLevel+1)
+
+		return nil
+
+	default:
+		panic("Node type not recognized, the page may have been corrupted.")
+	}
+}
+
+func indent(level int) {
+	for i := 0; i < level; i++ {
+		fmt.Print("  ")
+	}
+}
+
+func (t *Table) Insert(r *Row) error {
+	n, err := t.pager.GetPage(t.rootPageNum)
+	if err != nil {
+		return err
+	}
+
+	keyToInsert := r.id
+	c, err := TableFind(t, keyToInsert)
+	if err != nil {
+		return err
+	}
+
+	if c.cellNum < getLeafNodeNumCells(n) {
+		keyAtIdx := getLeafNodeKey(n, c.cellNum)
+		if keyAtIdx == keyToInsert {
+			return fmt.Errorf("duplicate key found '%d'", keyToInsert)
+		}
+	}
+
+	serialized, err := r.Serialize()
+	if err != nil {
+		return err
+	}
+
+	err = leafNodeInsert(c, r.id, serialized)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (t *Table) Close() error {
-	fullPages := t.numRows / rowsPerPage
-
-	for i := 0; i < int(fullPages); i++ {
+	for i := 0; i < int(t.pager.numPages); i++ {
 		if t.pager.pages[i] != nil {
-			if err := t.pager.FlushPage(uint32(i), pageSize); err != nil {
+			if err := t.pager.FlushPage(uint32(i)); err != nil {
 				return err
 			}
-		}
-	}
-
-	numAddtlRows := t.numRows % rowsPerPage
-	if numAddtlRows != 0 {
-		if err := t.pager.FlushPage(fullPages, numAddtlRows*rowSize); err != nil {
-			return err
 		}
 	}
 
@@ -164,8 +221,28 @@ func OpenDatabase(filename string) (*Table, error) {
 		return nil, err
 	}
 
+	if pager.numPages == 0 {
+		root, err := pager.GetPage(0)
+
+		if err != nil {
+			return nil, err
+		}
+
+		initializeLeafNode(root)
+		setNodeRoot(root, true)
+	}
+
 	return &Table{
-		numRows: pager.fileLength / rowSize,
-		pager:   pager,
+		rootPageNum: 0,
+		pager:       pager,
 	}, nil
+}
+
+func PrintConstants() {
+	color.Green("ROW_SIZE: %d\n", rowSize)
+	color.Green("COMMON_NODE_HEADER_SIZE: %d\n", commonNodeHeaderSize)
+	color.Green("LEAF_NODE_HEADER_SIZE: %d\n", leafNodeHeaderSize)
+	color.Green("LEAF_NODE_CELL_SIZE: %d\n", leafNodeCellSize)
+	color.Green("LEAF_NODE_SPACE_FOR_CELLS: %d\n", leafNodeCellSpace)
+	color.Green("LEAF_NODE_MAX_CELLS: %d\n", leafNodeMaxCells)
 }

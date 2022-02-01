@@ -72,6 +72,12 @@ func doMetaCommand(input string, t *persist.Table) error {
 	if strings.Compare(input, ".exit") == 0 {
 		t.Close()
 		os.Exit(0)
+	} else if strings.Compare(input, ".constants") == 0 {
+		color.Green("Constants:\n")
+		persist.PrintConstants()
+	} else if strings.Compare(input, ".btree") == 0 {
+		color.Green("Tree:\n")
+		t.PrintTree(0, 0)
 	} else {
 		return fmt.Errorf("unrecognized keyword at start of '%s'", input)
 	}
@@ -130,12 +136,7 @@ func executeStatement(stmnt *statement, t *persist.Table) {
 }
 
 func executeInsert(stmnt *statement, t *persist.Table) error {
-	serialized, err := stmnt.rowToInsert.Serialize()
-	if err != nil {
-		return err
-	}
-
-	return t.Insert(serialized)
+	return t.Insert(stmnt.rowToInsert)
 }
 
 func executeSelect(stmnt *statement, t *persist.Table) {
